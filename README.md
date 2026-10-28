@@ -51,6 +51,7 @@ Idempotency-Key: mabinogi-mobile:notice:3571370:created
   "schemaVersion": 1,
   "eventId": "mabinogi-mobile:notice:3571370:created",
   "board": "notice",
+  "category": "점검",
   "postId": "3571370",
   "title": "10/29(목) 정기점검 안내",
   "url": "https://mabinogimobile.nexon.com/News/Notice/3571370",
@@ -60,6 +61,7 @@ Idempotency-Key: mabinogi-mobile:notice:3571370:created
 ```
 
 - `board`: `notice`, `update`, `events`. 시각은 UTC ISO 8601이며 몰리가 표시 시 KST로 변환합니다.
+- `category`: 공지 목록에 표시된 분류 문구(예: `주요상품`, `점검`, `안내`, `완료`)입니다. 고정된 열거형으로 제한하지 않고 원문을 공백 정규화해 전달합니다. 공지에 분류가 없거나 다른 게시판이면 `null`입니다. 선택 필드이므로 기존 대기 이벤트에는 없을 수 있습니다. 기존 글의 분류가 바뀌어도 별도 알림을 보내지 않습니다.
 - `thumbnailUrl`: 선택 필드인 이미지 URL입니다. 공지·업데이트는 목록 및 상단 고정 배너의 `.thumbnail` 배경 이미지, 이벤트는 `.thumbnail` 내부 이미지에서 추출합니다. 고정 배너는 게시글 링크의 ID로 실제 목록과 연결하며 배너 자체를 새 글로 추가하지 않습니다. 모든 글에 전용 썸네일이 있는 것은 아닙니다. 작성자 프로필은 제외합니다. 이미지가 없거나 주소 형식이 잘못되면 `null`로 전달하며, 알림은 정상 처리합니다. 이미지 다운로드/실제 표시 가능성은 검사하지 않습니다.
 - 몰리는 `thumbnailUrl`이 있으면 Embed의 큰 이미지로 표시하고, 없거나 `null`이면 이미지 없이 표시하면 됩니다. 현재 이미지 주소는 감지기가 전달하며 Embed 구성은 몰리에서 구현할 사항입니다. 기존 대기 이벤트에는 필드가 없을 수 있어 누락도 허용해야 합니다. 선택 필드 추가이므로 `schemaVersion`과 `eventId` 규칙, 기존 상태 파일을 그대로 유지합니다. 수신부가 알 수 없는 필드를 거부한다면 감지 활성화 전에 수신부를 먼저 갱신하세요.
 - `eventId`는 게시판·글 ID로 고정되며 재전송 시 유지됩니다.

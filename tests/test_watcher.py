@@ -17,7 +17,7 @@ def state():
 
 
 def card(title, image=None):
-    return {'title': title, 'thumbnailUrl': image}
+    return {'title': title, 'thumbnailUrl': image, 'category': None}
 
 
 class Tests(unittest.TestCase):
@@ -103,6 +103,33 @@ class Tests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 w.validate_endpoint(url, 'token')
         w.validate_endpoint('https://example.com/webhooks/mabinogi/news', 'token')
+
+    def test_notice_category_labels_and_whitespace(self):
+        for label in ['주요상품', '점검', '안내', '완료', '새로운분류']:
+            markup = page([3]).replace('<a class="title">',
+                f'<div class="type"> \n<span>{label}</span> </div><a class="title">')
+            cards, _ = w.parse_page(markup)
+            self.assertEqual(label, cards['3']['category'])
+            self.assertEqual('Post 3 & news', cards['3']['title'])
+        self.assertIsNone(w.parse_page(page([3]))[0]['3']['category'])
+
+    def test_category_duplicate_and_no_leak_between_cards(self):
+        first = '<li data-threadid="3"><div class="type"><span>점검</span></div><a class="title">Title</a></li>'
+        cards, _ = w.parse_page(first + page([3, 4]))
+        self.assertEqual('점검', cards['3']['category'])
+        self.assertIsNone(cards['4']['category'])
+
+    def test_category_payload_and_retry(self):
+        def collect(board, known):
+            return {'3': {'title': 'Title', 'category': '주요상품', 'thumbnailUrl': None}}
+        s = w.discover(state(), collect)
+        self.assertEqual(['주요상품', None, None], [e['category'] for e in s['pending']])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'news.json'
+            w.save_state(path, s)
+            sent = []
+            w.deliver(w.load_state(path), path, '', '', lambda u, t, e: sent.append(e))
+            self.assertEqual('주요상품', sent[0]['category'])
 
     def test_no_redirect(self):
         self.assertIsNone(w.NoRedirect().redirect_request(None, None, 302, '', {}, 'https://other.example'))

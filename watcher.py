@@ -43,6 +43,7 @@ class ListParser(HTMLParser):
         self.paging = None
         self.card = None
         self.stack = []
+        self.category_parts = []
         self.title_parts = []
         self.title = ''
         self.image = None
@@ -58,6 +59,7 @@ class ListParser(HTMLParser):
             self.banner = is_banner
             self.card = a.get('data-threadid') or '__banner__'
             self.stack = []
+            self.category_parts = []
             self.title_parts = []
             self.title = ''
             self.image = None
@@ -71,6 +73,7 @@ class ListParser(HTMLParser):
         classes = a.get('class', '').split()
         in_thumbnail = 'thumbnail' in classes or bool(self.stack and self.stack[-1][1])
         in_title = (tag == 'a' and 'title' in classes) or bool(self.stack and self.stack[-1][2])
+        in_category = 'type' in classes or bool(self.stack and self.stack[-1][3])
         if 'thumbnail' in classes:
             match = re.search(r"""background-image\s*:\s*url\(\s*(?:'([^']*)'|"([^"]*)"|([^)]*))\s*\)""",
                               a.get('style', ''), re.IGNORECASE)
@@ -80,7 +83,7 @@ class ListParser(HTMLParser):
             self.image = (self.image or thumbnail_url(a.get('data-src') or '')
                           or thumbnail_url(a.get('src') or ''))
         if tag not in self.VOID:
-            self.stack.append((tag, in_thumbnail, in_title))
+            self.stack.append((tag, in_thumbnail, in_title, in_category))
 
     def handle_startendtag(self, tag, attrs):
         self.handle_starttag(tag, attrs)
@@ -100,6 +103,7 @@ class ListParser(HTMLParser):
                 previous = self.cards.get(self.card, {})
                 self.cards[self.card] = {
                     'title': self.title,
+                    'category': ' '.join(''.join(self.category_parts).split()) or previous.get('category'),
                     # A duplicate mobile card without an image must not erase the desktop image.
                     'thumbnailUrl': self.image or previous.get('thumbnailUrl'),
                 }
@@ -114,6 +118,8 @@ class ListParser(HTMLParser):
     def handle_data(self, data):
         if self.card and self.stack and self.stack[-1][2]:
             self.title_parts.append(data)
+        if self.card and self.stack and self.stack[-1][3]:
+            self.category_parts.append(data)
 
 
 def parse_page(html):
@@ -219,6 +225,7 @@ def discover(state, collector=collect):
                 'url': f'{ORIGIN}/News/{BOARDS[board]}/{post_id}',
                 'detectedAt': now,
                 'thumbnailUrl': cards[post_id].get('thumbnailUrl'),
+                'category': cards[post_id].get('category') if board == 'notice' else None,
             })
         updated['boards'][board] = sorted(known | cards.keys(), key=int)
     return updated
