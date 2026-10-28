@@ -1,0 +1,49 @@
+name: Watch Mabinogi Mobile news
+on:
+  schedule:
+    - cron: '7,17,27,37,47,57 * * * *'
+  workflow_dispatch:
+    inputs:
+      initialize:
+        description: 'First setup only: record historical posts without sending notifications'
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency:
+  group: mabinogi-news-watcher
+  cancel-in-progress: false
+jobs:
+  watch:
+    if: github.ref == 'refs/heads/main' && (vars.NEWS_WATCHER_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.initialize))
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Tests
+        run: python -m unittest discover -s tests -v
+      - name: Initialize baseline
+        if: github.event_name == 'workflow_dispatch' && inputs.initialize
+        run: python watcher.py --initialize
+      - name: Detect and deliver
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.initialize) }}
+        env:
+          MOLLY_WEBHOOK_URL: ${{ secrets.MOLLY_WEBHOOK_URL }}
+          MOLLY_WEBHOOK_TOKEN: ${{ secrets.MOLLY_WEBHOOK_TOKEN }}
+        run: python watcher.py
+      - name: Persist seen IDs and outbox even on delivery failure
+        if: always()
+        run: |
+          if [ -f state/news.json ]; then
+            git add state/news.json
+            if ! git diff --cached --quiet; then
+              git config user.name 'github-actions[bot]'
+              git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+              git commit -m 'chore: persist news watcher state [skip ci]'
+              git pull --rebase origin main
+              git push origin HEAD:main
+            fi
+          fi
