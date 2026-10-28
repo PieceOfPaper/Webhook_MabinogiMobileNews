@@ -84,9 +84,9 @@ class Tests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 w.deliver(s, path, 'https://example.com', 'secret', send)
             restored = w.load_state(path)
-            self.assertEqual(2, len(restored['pending']))
+            self.assertEqual(len(w.BOARDS) - 1, len(restored['pending']))
             w.deliver(restored, path, '', '', lambda u, t, e: sent.append(e['eventId']))
-            self.assertEqual(3, len(set(sent)))
+            self.assertEqual(len(w.BOARDS), len(set(sent)))
             self.assertEqual([], w.load_state(path)['pending'])
 
     def test_missing_or_corrupt_state_fails(self):
@@ -123,13 +123,66 @@ class Tests(unittest.TestCase):
         def collect(board, known):
             return {'3': {'title': 'Title', 'category': '주요상품', 'thumbnailUrl': None}}
         s = w.discover(state(), collect)
-        self.assertEqual(['주요상품', None, None], [e['category'] for e in s['pending']])
+        self.assertEqual(['주요상품', None, None, '주요상품'], [e['category'] for e in s['pending']])
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'news.json'
             w.save_state(path, s)
             sent = []
             w.deliver(w.load_state(path), path, '', '', lambda u, t, e: sent.append(e))
             self.assertEqual('주요상품', sent[0]['category'])
+
+    def test_devnote_payload_and_official_categories(self):
+        cards, _ = w.parse_page((Path(__file__).parent / 'fixtures/Devnote.html').read_text())
+        self.assertTrue(all(c['category'] == '개발자노트' for c in cards.values()))
+        result = w.discover(state(), lambda b, k: {'3': {'title': '에린 노트', 'category': 'CM노트', 'thumbnailUrl': None}})
+        event = result['pending'][-1]
+        self.assertEqual('devnote', event['board'])
+        self.assertEqual('CM노트', event['category'])
+        self.assertEqual(w.ORIGIN + '/News/Devnote/3', event['url'])
+        self.assertEqual('mabinogi-mobile:devnote:3:created', event['eventId'])
+
+    def test_legacy_state_baselines_only_new_board_then_notifies(self):
+        old = state()
+        del old['boards']['devnote']
+        original = copy.deepcopy(old)
+        calls = []
+        def collect(board, known, initialize=False):
+            calls.append((board, initialize))
+            return {'3': card('new')}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'news.json'
+            w.save_state(path, old)
+            migrated = w.discover(w.load_state(path), collect)
+            self.assertEqual(original, old)
+            self.assertEqual(('devnote', True), calls[-1])
+            self.assertEqual(['3'], migrated['boards']['devnote'])
+            self.assertEqual(3, len(migrated['pending']))
+            self.assertTrue(all(e['board'] != 'devnote' for e in migrated['pending']))
+            w.save_state(path, migrated)
+            next_state = w.discover(w.load_state(path), lambda b, k: {'3': card('old'), '4': card('new')})
+            self.assertEqual(1, len([e for e in next_state['pending'] if e['board'] == 'devnote']))
+
+    def test_incomplete_or_unknown_board_state_still_rejected(self):
+        for missing in ['notice', 'update', 'events']:
+            broken = state()
+            del broken['boards'][missing]
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / 'news.json'
+                w.save_state(path, broken)
+                with self.assertRaises(ValueError):
+                    w.load_state(path)
+
+    def test_new_board_baseline_failure_does_not_advance_state(self):
+        old = state()
+        del old['boards']['devnote']
+        original = copy.deepcopy(old)
+        def collect(board, known, initialize=False):
+            if initialize:
+                raise ValueError('baseline failed')
+            return {'3': card('new')}
+        with self.assertRaises(ValueError):
+            w.discover(old, collect)
+        self.assertEqual(original, old)
 
     def test_no_redirect(self):
         self.assertIsNone(w.NoRedirect().redirect_request(None, None, 302, '', {}, 'https://other.example'))

@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 
 ORIGIN = 'https://mabinogimobile.nexon.com'
-BOARDS = {'notice': 'Notice', 'update': 'Update', 'events': 'Events'}
+BOARDS = {'notice': 'Notice', 'update': 'Update', 'events': 'Events', 'devnote': 'Devnote'}
 MAX_PAGES = 100
 
 
@@ -67,7 +67,7 @@ class ListParser(HTMLParser):
             return
         if self.banner:
             link = re.search(r'Thread\.link\(\s*(\d+)', a.get('onclick', ''))
-            href = re.search(r'/News/(?:Notice|Update|Events)/(\d+)', a.get('href', ''))
+            href = re.search(r'/News/(?:Notice|Update|Events|Devnote)/(\d+)', a.get('href', ''))
             if link or href:
                 self.card = (link or href).group(1)
         classes = a.get('class', '').split()
@@ -198,7 +198,9 @@ def save_state(path, state):
 
 def load_state(path):
     state = json.loads(Path(path).read_text(encoding='utf-8'))
-    if state.get('version') != 1 or set(state.get('boards', {})) != set(BOARDS):
+    board_keys = set(state.get('boards', {}))
+    # Only the exact legacy three-board shape may omit the newly added board.
+    if state.get('version') != 1 or board_keys not in (set(BOARDS), set(BOARDS) - {'devnote'}):
         raise ValueError('Invalid state schema')
     if not isinstance(state.get('pending'), list):
         raise ValueError('Invalid pending state')
@@ -215,6 +217,11 @@ def discover(state, collector=collect):
     updated = copy.deepcopy(state)
     now = datetime.now(timezone.utc).isoformat()
     for board in BOARDS:
+        if board not in state['boards']:
+            # Baseline added boards once; do not flood subscribers with historical posts.
+            cards = collector(board, set(), initialize=True)
+            updated['boards'][board] = sorted(cards, key=int)
+            continue
         known = set(state['boards'][board])
         cards = collector(board, known)
         for post_id in sorted(cards.keys() - known, key=int):
@@ -225,7 +232,7 @@ def discover(state, collector=collect):
                 'url': f'{ORIGIN}/News/{BOARDS[board]}/{post_id}',
                 'detectedAt': now,
                 'thumbnailUrl': cards[post_id].get('thumbnailUrl'),
-                'category': cards[post_id].get('category') if board == 'notice' else None,
+                'category': cards[post_id].get('category') if board in {'notice', 'devnote'} else None,
             })
         updated['boards'][board] = sorted(known | cards.keys(), key=int)
     return updated
