@@ -16,6 +16,10 @@ def state():
     return {'version': 1, 'boards': {b: ['1', '2'] for b in w.BOARDS}, 'pending': []}
 
 
+def card(title, image=None):
+    return {'title': title, 'thumbnailUrl': image}
+
+
 class Tests(unittest.TestCase):
     def test_real_official_html(self):
         for name in w.BOARDS.values():
@@ -26,7 +30,7 @@ class Tests(unittest.TestCase):
 
     def test_duplicate_mobile_markup(self):
         cards, _ = w.parse_page(page([5, 5, 4]))
-        self.assertEqual({'5': 'Post 5 & news', '4': 'Post 4 & news'}, cards)
+        self.assertEqual({'5': card('Post 5 & news'), '4': card('Post 4 & news')}, cards)
 
     def test_blocked_page_rejected(self):
         with self.assertRaises(ValueError):
@@ -50,11 +54,11 @@ class Tests(unittest.TestCase):
 
     def test_order_event_identity_and_no_mutation(self):
         original = state()
-        result = w.discover(original, lambda board, known: {'4': 'four', '3': 'three', '2': 'renamed'})
+        result = w.discover(original, lambda board, known: {'4': card('four'), '3': card('three'), '2': card('renamed')})
         self.assertEqual([], original['pending'])
         self.assertEqual(['3', '4'], [e['postId'] for e in result['pending'][:2]])
         self.assertEqual('mabinogi-mobile:notice:3:created', result['pending'][0]['eventId'])
-        self.assertEqual(result, w.discover(result, lambda b, k: {'3': 'edited', '4': 'four'}))
+        self.assertEqual(result, w.discover(result, lambda b, k: {'3': card('edited'), '4': card('four')}))
 
     def test_failed_collection_does_not_mutate_state(self):
         original = state()
@@ -62,13 +66,13 @@ class Tests(unittest.TestCase):
         def collect(board, known):
             if board == 'update':
                 raise ValueError('blocked')
-            return {'3': 'new'}
+            return {'3': card('new')}
         with self.assertRaises(ValueError):
             w.discover(original, collect)
         self.assertEqual(before, original)
 
     def test_delivery_failure_and_restart(self):
-        s = w.discover(state(), lambda b, k: {'3': 'new'})
+        s = w.discover(state(), lambda b, k: {'3': card('new')})
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'news.json'
             w.save_state(path, s)
@@ -102,6 +106,71 @@ class Tests(unittest.TestCase):
 
     def test_no_redirect(self):
         self.assertIsNone(w.NoRedirect().redirect_request(None, None, 302, '', {}, 'https://other.example'))
+
+    def test_sticky_banner_image_enriches_matching_list_post_only(self):
+        banner = '<li class="banner_item swiper-slide"><div class="thumbnail" onclick="mmCommunity.Thread.link(3, this)" style="background-image:url(https://cdn.example/banner.png)"></div><a class="title">Banner</a></li>'
+        cards, _ = w.parse_page(banner + page([3, 4]))
+        self.assertEqual('https://cdn.example/banner.png', cards['3']['thumbnailUrl'])
+        self.assertEqual('Post 3 & news', cards['3']['title'])
+        self.assertIsNone(cards['4']['thumbnailUrl'])
+        cards, _ = w.parse_page(banner + page([4]))
+        self.assertNotIn('3', cards)
+
+    def test_thumbnail_css_and_img_variants(self):
+        styles = ["background-image: url('https://cdn.example/notice.png')",
+                  'background-image:URL("https://cdn.example/notice.png")',
+                  'background-image: url(https://cdn.example/notice.png)']
+        import html
+        for style in styles:
+            markup = page([3]).replace('<a class="title">',
+                f'<div class="thumbnail" style="{html.escape(style, quote=True)}"></div><a class="title">')
+            cards, _ = w.parse_page(markup)
+            self.assertEqual('https://cdn.example/notice.png', cards['3']['thumbnailUrl'])
+        markup = page([3]).replace('<a class="title">',
+            '<div class="thumbnail"><img src="/banner.png?a=1&amp;b=2" /></div><a class="title">')
+        self.assertEqual(w.ORIGIN + '/banner.png?a=1&b=2', w.parse_page(markup)[0]['3']['thumbnailUrl'])
+
+    def test_profile_and_missing_invalid_images_do_not_block_news(self):
+        for image in ['', '<img src="https://cdn.example/profile.png">',
+                      '<div class="thumbnail"><img src="javascript:bad"></div>',
+                      '<div class="thumbnail"><img src="https://[invalid"></div>']:
+            markup = page([3]).replace('<a class="title">', image + '<a class="title">')
+            cards, _ = w.parse_page(markup)
+            self.assertEqual('Post 3 & news', cards['3']['title'])
+            self.assertIsNone(cards['3']['thumbnailUrl'])
+
+    def test_duplicate_cards_preserve_image_in_both_orders(self):
+        with_image = '<li data-threadid="3"><div class="thumbnail"><img src="/banner.png"></div><a class="title">Title</a></li>'
+        no_image = '<li data-threadid="3"><a class="title">Title</a></li>'
+        paging = page([3]).split('</li>')[1]
+        for cards_html in [with_image + no_image, no_image + with_image]:
+            cards, _ = w.parse_page(cards_html + paging)
+            self.assertEqual(w.ORIGIN + '/banner.png', cards['3']['thumbnailUrl'])
+            self.assertEqual(1, len(cards))
+
+    def test_thumbnail_is_persisted_and_retried_unchanged(self):
+        s = w.discover(state(), lambda b, k: {'3': card('new', 'https://cdn.example/banner.png')})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'news.json'
+            w.save_state(path, s)
+            before = copy.deepcopy(s['pending'])
+            with self.assertRaises(RuntimeError):
+                w.deliver(s, path, '', '', lambda *args: (_ for _ in ()).throw(RuntimeError('failed')))
+            restored = w.load_state(path)
+            sent = []
+            w.deliver(restored, path, '', '', lambda u, t, e: sent.append(copy.deepcopy(e)))
+            self.assertEqual(before, sent)
+
+    def test_old_pending_payload_without_thumbnail_still_delivers(self):
+        s = state()
+        s['pending'] = [{'board': 'notice', 'eventId': 'old', 'title': 'Old payload'}]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'news.json'
+            w.save_state(path, s)
+            loaded = w.load_state(path)
+            sent = []
+            w.deliver(loaded, path, '', '', lambda u, t, e: sent.append(e))
+            self.assertNotIn('thumbnailUrl', sent[0])
 
 
 if __name__ == '__main__':

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import tempfile
@@ -18,40 +19,100 @@ BOARDS = {'notice': 'Notice', 'update': 'Update', 'events': 'Events'}
 MAX_PAGES = 100
 
 
+def thumbnail_url(value):
+    """Ignore malformed/unsupported images without failing news detection."""
+    try:
+        value = value.strip()
+        if not value or any(ord(c) < 32 for c in value):
+            return None
+        absolute = urllib.parse.urljoin(ORIGIN, value)
+        parts = urllib.parse.urlsplit(absolute)
+        if parts.scheme not in {'http', 'https'} or not parts.hostname or parts.username or parts.password:
+            return None
+        return absolute
+    except ValueError:
+        return None
+
+
 class ListParser(HTMLParser):
+    VOID = {'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'}
+
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.cards = {}
         self.paging = None
         self.card = None
-        self.title_depth = 0
+        self.stack = []
         self.title_parts = []
+        self.title = ''
+        self.image = None
+        self.banner = False
+        self.banner_images = {}
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
         if a.get('data-pagingtype') == 'thread':
             self.paging = a
-        if tag == 'li' and a.get('data-threadid', '').isdigit():
-            self.card = a['data-threadid']
-        if self.card and tag == 'a' and 'title' in a.get('class', '').split():
-            self.title_depth = 1
+        is_banner = tag == 'li' and 'banner_item' in a.get('class', '').split()
+        if tag == 'li' and (a.get('data-threadid', '').isdigit() or is_banner):
+            self.banner = is_banner
+            self.card = a.get('data-threadid') or '__banner__'
+            self.stack = []
             self.title_parts = []
-        elif self.title_depth:
-            if tag not in {'br', 'img', 'input', 'hr', 'meta', 'link'}:
-                self.title_depth += 1
+            self.title = ''
+            self.image = None
+        if not self.card:
+            return
+        if self.banner:
+            link = re.search(r'Thread\.link\(\s*(\d+)', a.get('onclick', ''))
+            href = re.search(r'/News/(?:Notice|Update|Events)/(\d+)', a.get('href', ''))
+            if link or href:
+                self.card = (link or href).group(1)
+        classes = a.get('class', '').split()
+        in_thumbnail = 'thumbnail' in classes or bool(self.stack and self.stack[-1][1])
+        in_title = (tag == 'a' and 'title' in classes) or bool(self.stack and self.stack[-1][2])
+        if 'thumbnail' in classes:
+            match = re.search(r"""background-image\s*:\s*url\(\s*(?:'([^']*)'|"([^"]*)"|([^)]*))\s*\)""",
+                              a.get('style', ''), re.IGNORECASE)
+            if match:
+                self.image = self.image or thumbnail_url(next((v for v in match.groups() if v), ''))
+        if tag == 'img' and in_thumbnail:
+            self.image = (self.image or thumbnail_url(a.get('data-src') or '')
+                          or thumbnail_url(a.get('src') or ''))
+        if tag not in self.VOID:
+            self.stack.append((tag, in_thumbnail, in_title))
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag not in self.VOID:
+            self.handle_endtag(tag)
 
     def handle_endtag(self, tag):
-        if self.title_depth:
-            self.title_depth -= 1
-            if self.title_depth == 0:
-                title = ' '.join(''.join(self.title_parts).split())
-                if title:
-                    self.cards[self.card] = title
+        if not self.card:
+            return
+        if tag == 'a' and self.stack and self.stack[-1][2]:
+            self.title = ' '.join(''.join(self.title_parts).split())
+            self.title_parts = []
         if tag == 'li':
+            if self.banner and self.card.isdigit() and self.image:
+                self.banner_images[self.card] = self.image
+            if self.title and not self.banner:
+                previous = self.cards.get(self.card, {})
+                self.cards[self.card] = {
+                    'title': self.title,
+                    # A duplicate mobile card without an image must not erase the desktop image.
+                    'thumbnailUrl': self.image or previous.get('thumbnailUrl'),
+                }
             self.card = None
+            self.stack = []
+        else:
+            for index in range(len(self.stack) - 1, -1, -1):
+                if self.stack[index][0] == tag:
+                    del self.stack[index:]
+                    break
 
     def handle_data(self, data):
-        if self.title_depth:
+        if self.card and self.stack and self.stack[-1][2]:
             self.title_parts.append(data)
 
 
@@ -63,6 +124,9 @@ def parse_page(html):
     total = int(parser.paging.get('data-totalcount', '-1'))
     if total < len(parser.cards):
         raise ValueError('Invalid pagination count')
+    # Sticky banners have no data-threadid; only enrich IDs present in the real list.
+    for post_id, card in parser.cards.items():
+        card['thumbnailUrl'] = card['thumbnailUrl'] or parser.banner_images.get(post_id)
     return parser.cards, parser.paging
 
 
@@ -151,9 +215,10 @@ def discover(state, collector=collect):
             updated['pending'].append({
                 'schemaVersion': 1,
                 'eventId': f'mabinogi-mobile:{board}:{post_id}:created',
-                'board': board, 'postId': post_id, 'title': cards[post_id],
+                'board': board, 'postId': post_id, 'title': cards[post_id]['title'],
                 'url': f'{ORIGIN}/News/{BOARDS[board]}/{post_id}',
                 'detectedAt': now,
+                'thumbnailUrl': cards[post_id].get('thumbnailUrl'),
             })
         updated['boards'][board] = sorted(known | cards.keys(), key=int)
     return updated
@@ -205,7 +270,8 @@ def main():
     if args.check:
         for board, name in BOARDS.items():
             cards, _ = parse_page(fetch_html(f'{ORIGIN}/News/{name}'))
-            print(f'{board}: {len(cards)} unique posts parsed')
+            images = sum(bool(card.get('thumbnailUrl')) for card in cards.values())
+            print(f'{board}: {len(cards)} unique posts parsed, {images} thumbnails')
         return
     path = Path(args.state)
     if args.initialize:
